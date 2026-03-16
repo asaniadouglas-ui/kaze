@@ -1,10 +1,12 @@
 package com.asaniadouglas.terminalapp
 
 import android.Manifest
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -47,6 +49,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -230,8 +233,12 @@ class MainActivity : ComponentActivity() {
 // --- Keyboard Row ---
 
 @Composable
-fun KeyboardRow(session: TerminalSession?) {
-    var ctrlActive by remember { mutableStateOf(false) }
+fun KeyboardRow(
+    session: TerminalSession?,
+    ctrlActive: Boolean,
+    onCtrlToggle: () -> Unit
+) {
+    val context = LocalContext.current
 
     val keys = listOf(
         "ESC" to "\u001b", "TAB" to "\t", "^C" to "\u0003", "^D" to "\u0004",
@@ -252,16 +259,35 @@ fun KeyboardRow(session: TerminalSession?) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
+        // CTRL toggle
         Box(
             modifier = Modifier
                 .height(36.dp).widthIn(min = 52.dp)
                 .clip(RoundedCornerShape(4.dp))
                 .background(if (ctrlActive) Color(0xFF4A9EFF) else Color(0xFF2D2D2D))
-                .clickable { ctrlActive = !ctrlActive }
+                .clickable { onCtrlToggle() }
                 .padding(horizontal = 10.dp),
             contentAlignment = Alignment.Center
         ) { Text("CTRL", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium) }
 
+        // PASTE button
+        Box(
+            modifier = Modifier
+                .height(36.dp).widthIn(min = 52.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF2D2D2D))
+                .clickable {
+                    val cm = context.getSystemService(ClipboardManager::class.java)
+                    cm.primaryClip?.getItemAt(0)
+                        ?.coerceToText(context)
+                        ?.toString()
+                        ?.let { session?.write(it) }
+                }
+                .padding(horizontal = 10.dp),
+            contentAlignment = Alignment.Center
+        ) { Text("PASTE", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium) }
+
+        // Sequence keys
         keys.forEach { (label, sequence) ->
             Box(
                 modifier = Modifier
@@ -271,7 +297,7 @@ fun KeyboardRow(session: TerminalSession?) {
                     .clickable {
                         if (ctrlActive && label.length == 1 && label[0].isLetter()) {
                             session?.write(String(byteArrayOf((label[0].code and 0x1f).toByte())))
-                            ctrlActive = false
+                            onCtrlToggle()
                         } else {
                             session?.write(sequence)
                         }
@@ -290,8 +316,10 @@ fun KeyboardRow(session: TerminalSession?) {
 fun SettingsSheet(
     currentTheme: TerminalTheme,
     fontSize: Float,
+    backToEsc: Boolean,
     onThemeChange: (TerminalTheme) -> Unit,
     onFontSizeChange: (Float) -> Unit,
+    onBackToEscChange: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState()
@@ -313,6 +341,7 @@ fun SettingsSheet(
             Text("Settings", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
             Spacer(modifier = Modifier.height(24.dp))
 
+            // Theme picker
             Text("Theme", fontSize = 12.sp, color = Color.Gray)
             Spacer(modifier = Modifier.height(8.dp))
             Row(
@@ -348,9 +377,26 @@ fun SettingsSheet(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+
+            // Font size slider
             Text("Font Size: ${fontSize.toInt()}sp", fontSize = 12.sp, color = Color.Gray)
             Spacer(modifier = Modifier.height(8.dp))
             Slider(value = fontSize, onValueChange = onFontSizeChange, valueRange = 20f..80f)
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Back → ESC toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text("Back key → ESC", fontSize = 14.sp, color = Color.White)
+                    Text("Useful for vim / nano", fontSize = 11.sp, color = Color.Gray)
+                }
+                Switch(checked = backToEsc, onCheckedChange = onBackToEscChange)
+            }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 Spacer(modifier = Modifier.height(24.dp))
@@ -372,15 +418,37 @@ fun SettingsSheet(
 @Composable
 fun TerminalScreen(service: TerminalService) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("kaze_prefs", Context.MODE_PRIVATE) }
+
     val tabs = remember { mutableStateListOf<TerminalTab>().also { it.addAll(service.tabs) } }
     val viewCache = remember { mutableMapOf<Int, TerminalView>() }
     val pagerState = rememberPagerState { tabs.size }
     val scope = rememberCoroutineScope()
+
     var renamingTab by remember { mutableStateOf<TerminalTab?>(null) }
     var renameText by remember { mutableStateOf("") }
-    var currentTheme by remember { mutableStateOf(dracula) }
-    var fontSize by remember { mutableStateOf(50f) }
     var showSettings by remember { mutableStateOf(false) }
+
+    // Persisted settings
+    var currentTheme by remember {
+        mutableStateOf(
+            allThemes.firstOrNull { it.name == prefs.getString("theme", "Dracula") } ?: dracula
+        )
+    }
+    var fontSize by remember { mutableStateOf(prefs.getFloat("font_size", 50f)) }
+    var backToEsc by remember { mutableStateOf(prefs.getBoolean("back_esc", false)) }
+
+    // Hoisted CTRL state so TerminalViewClient.readControlKey() can see it
+    var ctrlActive by remember { mutableStateOf(false) }
+
+    // Bundled JetBrains Mono font
+    val terminalTypeface = remember {
+        try {
+            Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono-Regular.ttf")
+        } catch (_: Exception) {
+            Typeface.MONOSPACE
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (tabs.isEmpty()) tabs.add(service.createTab())
@@ -425,15 +493,22 @@ fun TerminalScreen(service: TerminalService) {
         SettingsSheet(
             currentTheme = currentTheme,
             fontSize = fontSize,
+            backToEsc = backToEsc,
             onThemeChange = { theme ->
                 currentTheme = theme
+                prefs.edit().putString("theme", theme.name).apply()
                 viewCache.forEach { (id, view) ->
                     tabs.find { it.id == id }?.let { applyTheme(it.session, view, theme) }
                 }
             },
             onFontSizeChange = { size ->
                 fontSize = size
+                prefs.edit().putFloat("font_size", size).apply()
                 viewCache.values.forEach { it.setTextSize(size.toInt()) }
+            },
+            onBackToEscChange = { v ->
+                backToEsc = v
+                prefs.edit().putBoolean("back_esc", v).apply()
             },
             onDismiss = { showSettings = false }
         )
@@ -520,12 +595,7 @@ fun TerminalScreen(service: TerminalService) {
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    "×",
-                                    color = Color(0xFF888888),
-                                    fontSize = 14.sp,
-                                    lineHeight = 14.sp
-                                )
+                                Text("×", color = Color(0xFF888888), fontSize = 14.sp, lineHeight = 14.sp)
                             }
                         }
                     }
@@ -573,7 +643,7 @@ fun TerminalScreen(service: TerminalService) {
                                         as InputMethodManager
                                 imm.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
                             }
-                            override fun shouldBackButtonBeMappedToEscape(): Boolean = false
+                            override fun shouldBackButtonBeMappedToEscape(): Boolean = backToEsc
                             override fun shouldEnforceCharBasedInput(): Boolean = false
                             override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
                             override fun isTerminalViewSelected(): Boolean = true
@@ -581,7 +651,7 @@ fun TerminalScreen(service: TerminalService) {
                             override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean = false
                             override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
                             override fun onLongPress(event: MotionEvent): Boolean = false
-                            override fun readControlKey(): Boolean = false
+                            override fun readControlKey(): Boolean = ctrlActive
                             override fun readAltKey(): Boolean = false
                             override fun readShiftKey(): Boolean = false
                             override fun readFnKey(): Boolean = false
@@ -597,6 +667,7 @@ fun TerminalScreen(service: TerminalService) {
                         })
                         v.setFocusableInTouchMode(true)
                         v.setTextSize(fontSize.toInt())
+                        v.setTypeface(terminalTypeface)
                         v.setBackgroundColor(currentTheme.background)
                         v.attachSession(tab.session)
                         applyTheme(tab.session, v, currentTheme)
@@ -605,13 +676,24 @@ fun TerminalScreen(service: TerminalService) {
 
                 DisposableEffect(tab.id) {
                     service.viewCallbacks[tab.id] = { view.post { view.onScreenUpdated() } }
-                    onDispose { service.viewCallbacks.remove(tab.id) }
+                    service.titleCallbacks[tab.id] = { newTitle ->
+                        val idx = tabs.indexOfFirst { it.id == tab.id }
+                        if (idx >= 0) tabs[idx] = tabs[idx].copy(name = newTitle)
+                    }
+                    onDispose {
+                        service.viewCallbacks.remove(tab.id)
+                        service.titleCallbacks.remove(tab.id)
+                    }
                 }
 
                 AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
             }
         }
 
-        KeyboardRow(session = currentSession)
+        KeyboardRow(
+            session = currentSession,
+            ctrlActive = ctrlActive,
+            onCtrlToggle = { ctrlActive = !ctrlActive }
+        )
     }
 }

@@ -5,6 +5,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
@@ -23,6 +25,7 @@ class TerminalService : Service() {
     private val binder = LocalBinder()
     val tabs = mutableListOf<TerminalTab>()
     val viewCallbacks = mutableMapOf<Int, () -> Unit>()
+    val titleCallbacks = mutableMapOf<Int, (String) -> Unit>()
 
     inner class LocalBinder : Binder() {
         fun getService(): TerminalService = this@TerminalService
@@ -57,10 +60,18 @@ class TerminalService : Service() {
             "LOGNAME=terminal"
         )
         val client = object : TerminalSessionClient {
-            override fun onTextChanged(changedSession: TerminalSession) { viewCallbacks[id]?.invoke() }
-            override fun onTitleChanged(changedSession: TerminalSession) {}
+            override fun onTextChanged(changedSession: TerminalSession) {
+                viewCallbacks[id]?.invoke()
+            }
+            override fun onTitleChanged(changedSession: TerminalSession) {
+                val title = changedSession.title
+                if (!title.isNullOrEmpty()) titleCallbacks[id]?.invoke(title)
+            }
             override fun onSessionFinished(finishedSession: TerminalSession) {}
-            override fun onCopyTextToClipboard(session: TerminalSession, text: String) {}
+            override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
+                val cm = getSystemService(ClipboardManager::class.java)
+                cm.setPrimaryClip(ClipData.newPlainText("terminal", text))
+            }
             override fun onPasteTextFromClipboard(session: TerminalSession?) {}
             override fun onBell(session: TerminalSession) {}
             override fun onColorsChanged(session: TerminalSession) {}
@@ -89,6 +100,7 @@ class TerminalService : Service() {
             tabs[index].session.finishIfRunning()
             tabs.removeAt(index)
             viewCallbacks.remove(id)
+            titleCallbacks.remove(id)
             updateNotification()
         }
     }
@@ -105,9 +117,9 @@ class TerminalService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Terminal")
+            .setContentTitle("kaze")
             .setContentText("${tabs.size} session${if (tabs.size != 1) "s" else ""} running")
-            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setSmallIcon(R.drawable.ic_terminal)
             .setContentIntent(pi)
             .setOngoing(true)
             .build()
