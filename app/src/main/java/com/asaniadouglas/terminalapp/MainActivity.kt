@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.content.ServiceConnection
 import android.graphics.Typeface
 import android.os.Build
@@ -70,6 +71,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -236,7 +238,8 @@ class MainActivity : ComponentActivity() {
 fun KeyboardRow(
     session: TerminalSession?,
     ctrlActive: Boolean,
-    onCtrlToggle: () -> Unit
+    onCtrlToggle: () -> Unit,
+    onShowShortcuts: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -306,6 +309,17 @@ fun KeyboardRow(
                 contentAlignment = Alignment.Center
             ) { Text(label, color = Color.White, fontSize = 12.sp) }
         }
+
+        // Help button
+        Box(
+            modifier = Modifier
+                .height(36.dp).widthIn(min = 36.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF2D2D2D))
+                .clickable { onShowShortcuts() }
+                .padding(horizontal = 10.dp),
+            contentAlignment = Alignment.Center
+        ) { Text("?", color = Color(0xFF888888), fontSize = 14.sp, fontWeight = FontWeight.Bold) }
     }
 }
 
@@ -412,6 +426,55 @@ fun SettingsSheet(
     }
 }
 
+// --- Shortcuts Sheet ---
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ShortcutsSheet(onDismiss: () -> Unit) {
+    val shortcuts = listOf(
+        "CTRL+C" to "Interrupt / kill running process",
+        "CTRL+D" to "EOF — logout / close shell",
+        "CTRL+Z" to "Suspend process to background",
+        "CTRL+L" to "Clear screen",
+        "CTRL+A" to "Jump to beginning of line",
+        "CTRL+E" to "Jump to end of line",
+        "CTRL+U" to "Delete to start of line",
+        "CTRL+K" to "Delete to end of line",
+        "CTRL+W" to "Delete previous word",
+        "CTRL+R" to "Reverse search command history"
+    )
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF1E1E1E)
+    ) {
+        Column(modifier = Modifier.padding(20.dp, 8.dp, 20.dp, 32.dp)) {
+            Text(
+                "Keyboard Shortcuts",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            shortcuts.forEach { (combo, desc) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp)
+                ) {
+                    Text(
+                        combo,
+                        fontSize = 13.sp,
+                        color = Color(0xFF4A9EFF),
+                        modifier = Modifier.width(80.dp),
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(desc, fontSize = 13.sp, color = Color(0xFFCCCCCC))
+                }
+            }
+        }
+    }
+}
+
 // --- Terminal Screen ---
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -428,6 +491,7 @@ fun TerminalScreen(service: TerminalService) {
     var renamingTab by remember { mutableStateOf<TerminalTab?>(null) }
     var renameText by remember { mutableStateOf("") }
     var showSettings by remember { mutableStateOf(false) }
+    var showShortcuts by remember { mutableStateOf(false) }
 
     // Persisted settings
     var currentTheme by remember {
@@ -451,7 +515,23 @@ fun TerminalScreen(service: TerminalService) {
     }
 
     LaunchedEffect(Unit) {
-        if (tabs.isEmpty()) tabs.add(service.createTab())
+        if (tabs.isEmpty()) {
+            val saved = prefs.getString("saved_tabs", null)
+            if (!saved.isNullOrBlank()) {
+                saved.lines().filter { it.isNotBlank() }.forEach { line ->
+                    val parts = line.split("\t", limit = 2)
+                    val name = parts[0]
+                    val cwd = if (parts.size > 1) parts[1] else null
+                    val tab = service.createTab(startCwd = cwd)
+                    val renamed = tab.copy(name = name)
+                    val si = service.tabs.indexOfFirst { it.id == tab.id }
+                    if (si >= 0) service.tabs[si] = renamed
+                    tabs.add(renamed)
+                }
+            } else {
+                tabs.add(service.createTab())
+            }
+        }
     }
 
     val currentSession = if (tabs.isNotEmpty() && pagerState.currentPage < tabs.size)
@@ -487,6 +567,10 @@ fun TerminalScreen(service: TerminalService) {
                 TextButton(onClick = { renamingTab = null }) { Text("Cancel") }
             }
         )
+    }
+
+    if (showShortcuts) {
+        ShortcutsSheet(onDismiss = { showShortcuts = false })
     }
 
     if (showSettings) {
@@ -628,16 +712,34 @@ fun TerminalScreen(service: TerminalService) {
         if (tabs.isNotEmpty()) {
             HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { page ->
                 val tab = tabs[page]
-                var currentTextSize = fontSize
                 val view = viewCache.getOrPut(tab.id) {
                     TerminalView(context, null).also { v ->
                         v.setTerminalViewClient(object : TerminalViewClient {
                             override fun onScale(scale: Float): Float {
-                                currentTextSize = (currentTextSize * scale).coerceIn(10f, 100f)
-                                v.setTextSize(currentTextSize.toInt())
+                                val newSize = (fontSize * scale).coerceIn(10f, 100f)
+                                fontSize = newSize
+                                v.setTextSize(newSize.toInt())
+                                prefs.edit().putFloat("font_size", newSize).apply()
                                 return scale
                             }
                             override fun onSingleTapUp(e: MotionEvent) {
+                                val emulator = tab.session.getEmulator()
+                                if (emulator != null && v.height > 0) {
+                                    val row = (e.y / (v.height.toFloat() / emulator.mRows))
+                                        .toInt().coerceIn(0, emulator.mRows - 1)
+                                    val lineText = emulator.screen.getSelectedText(
+                                        0, row, emulator.mColumns - 1, row
+                                    ) ?: ""
+                                    val urlMatch = Regex("""https?://[^\s"<>]+""").find(lineText)
+                                    if (urlMatch != null) {
+                                        val url = urlMatch.value.trimEnd('.', ',', ')', ']')
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        )
+                                        return
+                                    }
+                                }
                                 v.requestFocus()
                                 val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE)
                                         as InputMethodManager
@@ -693,7 +795,8 @@ fun TerminalScreen(service: TerminalService) {
         KeyboardRow(
             session = currentSession,
             ctrlActive = ctrlActive,
-            onCtrlToggle = { ctrlActive = !ctrlActive }
+            onCtrlToggle = { ctrlActive = !ctrlActive },
+            onShowShortcuts = { showShortcuts = true }
         )
     }
 }

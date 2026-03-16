@@ -41,7 +41,7 @@ class TerminalService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
-    fun createTab(): TerminalTab {
+    fun createTab(startCwd: String? = null): TerminalTab {
         val id = (tabs.maxOfOrNull { it.id } ?: 0) + 1
         val homeDir = filesDir.absolutePath
         val shell = listOf(
@@ -86,7 +86,7 @@ class TerminalService : Service() {
             override fun logStackTraceWithMessage(tag: String, message: String, e: Exception) {}
             override fun logStackTrace(tag: String, e: Exception) {}
         }
-        val session = TerminalSession(shell, homeDir, args, env, 4000, client)
+        val session = TerminalSession(shell, startCwd ?: homeDir, args, env, 4000, client)
         val tab = TerminalTab(id, "Shell $id", session)
         tabs.add(tab)
         session.write("\n")
@@ -101,8 +101,18 @@ class TerminalService : Service() {
             tabs.removeAt(index)
             viewCallbacks.remove(id)
             titleCallbacks.remove(id)
+            saveTabs()
             updateNotification()
         }
+    }
+
+    private fun saveTabs() {
+        val serialized = tabs.joinToString(separator = "\n") { tab ->
+            val cwd = tab.session.getCwd() ?: filesDir.absolutePath
+            "${tab.name}\t$cwd"
+        }
+        getSharedPreferences("kaze_prefs", MODE_PRIVATE)
+            .edit().putString("saved_tabs", serialized).apply()
     }
 
     fun updateNotification() {
@@ -135,6 +145,7 @@ class TerminalService : Service() {
     }
 
     override fun onDestroy() {
+        saveTabs()
         tabs.forEach { it.session.finishIfRunning() }
         super.onDestroy()
     }
