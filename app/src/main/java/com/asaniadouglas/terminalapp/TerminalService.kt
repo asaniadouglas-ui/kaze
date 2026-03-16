@@ -11,6 +11,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
+import java.io.File
 
 class TerminalService : Service() {
 
@@ -35,48 +36,46 @@ class TerminalService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int,
-                                startId: Int): Int {
-        return START_STICKY
-    }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     fun createTab(): TerminalTab {
         val id = (tabs.maxOfOrNull { it.id } ?: 0) + 1
-        val filesDir = filesDir.absolutePath
-        val args = arrayOf("/system/bin/sh")
-        val env = arrayOf("TERM=xterm-256color", "HOME=" + filesDir)
+        val homeDir = filesDir.absolutePath
+        val shell = listOf(
+            "/data/data/com.termux/files/usr/bin/bash",
+            "/system/bin/bash",
+            "/system/bin/sh"
+        ).firstOrNull { File(it).canExecute() } ?: "/system/bin/sh"
+        val args = arrayOf(shell)
+        val env = arrayOf(
+            "TERM=xterm-256color",
+            "COLORTERM=truecolor",
+            "HOME=$homeDir",
+            "PATH=/system/bin:/system/xbin",
+            "LANG=en_US.UTF-8",
+            "USER=terminal",
+            "LOGNAME=terminal"
+        )
         val client = object : TerminalSessionClient {
-            override fun onTextChanged(changedSession:
-                                       TerminalSession) {
-                viewCallbacks[id]?.invoke()
-            }
-            override fun onTitleChanged(changedSession:
-                                        TerminalSession) {}
-            override fun onSessionFinished(finishedSession:
-                                           TerminalSession) {}
-            override fun onCopyTextToClipboard(session:
-                                               TerminalSession, text: String) {}
-            override fun onPasteTextFromClipboard(session:
-                                                  TerminalSession?) {}
+            override fun onTextChanged(changedSession: TerminalSession) { viewCallbacks[id]?.invoke() }
+            override fun onTitleChanged(changedSession: TerminalSession) {}
+            override fun onSessionFinished(finishedSession: TerminalSession) {}
+            override fun onCopyTextToClipboard(session: TerminalSession, text: String) {}
+            override fun onPasteTextFromClipboard(session: TerminalSession?) {}
             override fun onBell(session: TerminalSession) {}
-            override fun onColorsChanged(session: TerminalSession)
-            {}
-            override fun onTerminalCursorStateChange(state: Boolean)
-            {}
-            override fun setTerminalShellPid(session:
-                                             TerminalSession, pid: Int) {}
+            override fun onColorsChanged(session: TerminalSession) {}
+            override fun onTerminalCursorStateChange(state: Boolean) {}
+            override fun setTerminalShellPid(session: TerminalSession, pid: Int) {}
             override fun getTerminalCursorStyle(): Int = 0
             override fun logError(tag: String, message: String) {}
             override fun logWarn(tag: String, message: String) {}
             override fun logInfo(tag: String, message: String) {}
             override fun logDebug(tag: String, message: String) {}
             override fun logVerbose(tag: String, message: String) {}
-            override fun logStackTraceWithMessage(tag: String,
-                                                  message: String, e: Exception) {}
+            override fun logStackTraceWithMessage(tag: String, message: String, e: Exception) {}
             override fun logStackTrace(tag: String, e: Exception) {}
         }
-        val session = TerminalSession("/system/bin/sh", filesDir,
-            args, env, 4000, client)
+        val session = TerminalSession(shell, homeDir, args, env, 4000, client)
         val tab = TerminalTab(id, "Shell $id", session)
         tabs.add(tab)
         session.write("\n")
@@ -84,21 +83,31 @@ class TerminalService : Service() {
         return tab
     }
 
+    fun closeTab(id: Int) {
+        val index = tabs.indexOfFirst { it.id == id }
+        if (index >= 0) {
+            tabs[index].session.finishIfRunning()
+            tabs.removeAt(index)
+            viewCallbacks.remove(id)
+            updateNotification()
+        }
+    }
+
     fun updateNotification() {
-        val manager =
-            getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification())
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun buildNotification(): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pi = PendingIntent.getActivity(this, 0, intent,
-            PendingIntent.FLAG_IMMUTABLE)
+        val pi = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Terminal")
-            .setContentText("${tabs.size} session${if (tabs.size !=
-                1) "s" else ""} running")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentText("${tabs.size} session${if (tabs.size != 1) "s" else ""} running")
+            .setSmallIcon(android.R.drawable.ic_menu_manage)
             .setContentIntent(pi)
             .setOngoing(true)
             .build()
@@ -109,9 +118,7 @@ class TerminalService : Service() {
             CHANNEL_ID,
             "Terminal Sessions",
             NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Keeps terminal sessions alive"
-        }
+        ).apply { description = "Keeps terminal sessions alive" }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
