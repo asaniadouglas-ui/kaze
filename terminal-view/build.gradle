@@ -39,6 +39,16 @@ android {
 
 dependencies {
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.robolectric:robolectric:4.13"
+}
+
+android {
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            returnDefaultValues = true
+        }
+    }
 }
 
 task sourceJar(type: Jar) {
